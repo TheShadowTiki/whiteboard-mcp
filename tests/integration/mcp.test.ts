@@ -113,13 +113,13 @@ describe('MCP server over stdio (SDK client)', () => {
     client = await connect();
   });
 
-  it('negotiates and lists the eleven tools', async () => {
+  it('negotiates and lists the twelve tools', async () => {
     expect(client.getServerVersion()?.name).toBe('whiteboard-mcp');
     expect(client.getInstructions()?.length).toBeLessThanOrEqual(700);
     expect(client.getInstructions()).toContain('open the exact board URL they give you, path included, in your in-app browser or preview tool');
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['canvas_delete', 'canvas_draw', 'canvas_export', 'canvas_focus', 'canvas_guide', 'canvas_mermaid', 'canvas_open', 'canvas_read', 'canvas_save', 'canvas_screenshot', 'canvas_search'].sort(),
+      ['canvas_delete', 'canvas_draw', 'canvas_export', 'canvas_focus', 'canvas_guide', 'canvas_image', 'canvas_mermaid', 'canvas_open', 'canvas_read', 'canvas_save', 'canvas_screenshot', 'canvas_search'].sort(),
     );
   });
 
@@ -220,6 +220,58 @@ describe('MCP server over stdio (SDK client)', () => {
     expect(refused.result.isError).toBe(true);
     expect(refused.text).toContain('Refusing');
     expect(existsSync(outside)).toBe(false);
+  });
+
+  it('places a picture from a file with its data, swaps it by id, and refuses non-images', async () => {
+    const png = (w: number, h: number) => {
+      const b = Buffer.alloc(33);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+      b.writeUInt32BE(13, 8);
+      b.write('IHDR', 12, 'latin1');
+      b.writeUInt32BE(w, 16);
+      b.writeUInt32BE(h, 20);
+      return b;
+    };
+    mkdirSync(join(workspace, 'plots'), { recursive: true });
+    writeFileSync(join(workspace, 'plots', 'wide.png'), png(2400, 600));
+    writeFileSync(join(workspace, 'plots', 'small.png'), png(200, 100));
+    writeFileSync(join(workspace, 'plots', 'fake.png'), 'not really a png');
+
+    const placed = await call(client, 'canvas_image', { path: 'plots/wide.png', id: 'plot', x: 0, y: 800 });
+    expect(placed.result.isError).toBeFalsy();
+    expect(placed.text).toContain('Created: plot (2400×600px png');
+    expect(placed.text).toContain('shown 1200×300');
+    const { port, token } = daemon();
+    const snap = async () => (await (await fetch(`http://127.0.0.1:${port}/api/canvases/${canvasId}`, { headers: { Authorization: `Bearer ${token}` } })).json()) as {
+      elements: Array<Record<string, unknown>>;
+      files: Record<string, { mimeType: string; dataURL: string }>;
+    };
+    let board = await snap();
+    const img = board.elements.find((e) => e.id === 'plot')!;
+    expect(img).toMatchObject({ type: 'image', x: 0, y: 800, width: 1200, height: 300, status: 'saved' });
+    const wideId = createHash('sha1').update(png(2400, 600)).digest('hex');
+    expect(img.fileId).toBe(wideId);
+    expect(board.files[wideId]!.mimeType).toBe('image/png');
+    expect(board.files[wideId]!.dataURL).toBe(`data:image/png;base64,${png(2400, 600).toString('base64')}`);
+
+    const swapped = await call(client, 'canvas_image', { path: 'plots/small.png', id: 'plot', width: 400 });
+    expect(swapped.text).toContain('Updated: plot');
+    board = await snap();
+    expect(board.elements.find((e) => e.id === 'plot')).toMatchObject({ x: 0, y: 800, width: 400, height: 200 });
+
+    const moved = await call(client, 'canvas_draw', { elements: [{ id: 'plot', x: 100 }] });
+    expect(moved.result.isError).toBeFalsy();
+    expect((await snap()).elements.find((e) => e.id === 'plot')).toMatchObject({ x: 100, width: 400 });
+
+    const fake = await call(client, 'canvas_image', { path: 'plots/fake.png' });
+    expect(fake.result.isError).toBe(true);
+    expect(fake.text).toContain('is not a PNG, JPEG, GIF, WebP or SVG image');
+    const missing = await call(client, 'canvas_image', { path: 'plots/none.png' });
+    expect(missing.result.isError).toBe(true);
+    expect(missing.text).toContain('Cannot read');
+    const notImage = await call(client, 'canvas_image', { path: 'plots/small.png', id: 'c' });
+    expect(notImage.result.isError).toBe(true);
+    expect(notImage.text).toContain('not an image');
   });
 
   it('returns the guide', async () => {
@@ -695,7 +747,7 @@ describe('daemon start when the agent app connects', () => {
     writeFileSync(hang, 'setTimeout(() => {}, 4000);\n');
     const started = Date.now();
     const client = await connect({ env: await isolated({ WHITEBOARD_ENTRY: hang }) });
-    expect((await client.listTools()).tools).toHaveLength(11);
+    expect((await client.listTools()).tools).toHaveLength(12);
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
@@ -703,7 +755,7 @@ describe('daemon start when the agent app connects', () => {
     const e = await isolated({ WHITEBOARD_ENTRY: eperm });
     const client = await connect({ env: e });
     await until(() => readLog(e.WHITEBOARD_HOME).includes('listen failed'));
-    expect((await client.listTools()).tools).toHaveLength(11);
+    expect((await client.listTools()).tools).toHaveLength(12);
     const { text, result } = await call(client, 'canvas_open', { title: 'Sandboxed' });
     expect(result.isError).toBe(true);
     expect(text).toMatch(/not permitted here, probably a sandbox/);

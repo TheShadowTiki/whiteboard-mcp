@@ -1,9 +1,11 @@
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { CanvasClient, CanvasError } from '../canvas/client.js';
 import { describeChanges, describeScene } from '../shared/describe.js';
-import { ELEMENT_SPEC_FIELDS, buildElements, deleteElements, type ElementSpec } from '../shared/elements.js';
+import { ELEMENT_SPEC_FIELDS, buildElements, buildImage, deleteElements, type ElementSpec } from '../shared/elements.js';
+import { fitSize, imageInfo } from '../shared/image.js';
 import type { CanvasSummary, ChangesResponse, ExElement, MermaidResult, SavedSummary, ScreenshotResult } from '../shared/protocol.js';
 import { editorWindow, type EditorWindow } from './editor.js';
 import { closestBoards, findBoard, whereFrom } from './find.js';
@@ -194,6 +196,28 @@ export const ELEMENT_SCHEMA: Schema = {
 };
 
 const MAX_ELEMENTS = 200;
+/** Largest image file canvas_image sends; a board holds 25 MB of files in all (src/canvas/store.ts). */
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+/** Default on-board width cap for large pictures (they keep their aspect ratio). */
+const MAX_IMAGE_WIDTH = 1200;
+const positive = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+
+/** Reads an image file for canvas_image; refuses anything whose bytes aren't a known image format. */
+export function readImage(path: string): { buf: Buffer; info: NonNullable<ReturnType<typeof imageInfo>> } {
+  let buf: Buffer;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) throw new ToolError(`${path} is not a file.`);
+    if (st.size > MAX_IMAGE_BYTES) throw new ToolError(`${path} is ${(st.size / 1048576).toFixed(1)} MB; images are limited to ${MAX_IMAGE_BYTES / 1048576} MB. Downscale or compress it first.`);
+    buf = readFileSync(path);
+  } catch (err) {
+    if (err instanceof ToolError) throw err;
+    throw new ToolError(`Cannot read ${path}: ${(err as Error).message}`);
+  }
+  const info = imageInfo(buf);
+  if (!info) throw new ToolError(`${path} is not a PNG, JPEG, GIF, WebP or SVG image.`);
+  return { buf, info };
+}
 
 function text(...lines: Array<string | undefined | false>): string {
   return lines.filter((l): l is string => typeof l === 'string' && l.length > 0).join('\n');
@@ -452,6 +476,46 @@ export const TOOLS: Tool[] = [
         res.stale.length > 0 && `Not applied (the human edited them at the same moment, retry): ${res.stale.join(', ')}`,
         built.warnings.length > 0 && `Warnings:\n${built.warnings.map((w) => `- ${w}`).join('\n')}`,
         built.ids.length > 0 && describeScene([...merged.values()], { ids: built.ids }),
+        await ctx.reveal(client, ref, snap.viewers),
+      );
+    },
+  },
+  {
+    name: 'canvas_image',
+    description: 'Put a picture file (PNG, JPEG, GIF, WebP, SVG) on the board. Same id swaps it; move, resize or frame it with canvas_draw.',
+    inputSchema: obj(
+      {
+        path: str('Image file (relative to the workspace)'),
+        id: str('Readable id'),
+        x: num('Left edge in px'),
+        y: num('Top edge in px'),
+        width: num(`Width in px; height keeps the aspect (default: own size, max ${MAX_IMAGE_WIDTH})`),
+      },
+      ['path'],
+    ),
+    async run(args, ctx) {
+      await ctx.session.ready();
+      const path = resolve(ctx.session.workspace, args.path as string);
+      const { buf, info } = readImage(path);
+      const fileId = createHash('sha1').update(buf).digest('hex');
+      const { client, ref } = await ctx.canvas();
+      const snap = await client.snapshot(ref.id);
+      const size = fitSize(info, positive(args.width), undefined, MAX_IMAGE_WIDTH);
+      const built = buildImage(
+        { id: args.id as string | undefined, x: args.x as number | undefined, y: args.y as number | undefined, fileId, ...size },
+        snap.elements,
+      );
+      if (!built.ids.length) throw new ToolError(built.warnings.join('\n') || 'Nothing was placed.');
+      const file = { id: fileId, mimeType: info.mimeType, dataURL: `data:${info.mimeType};base64,${buf.toString('base64')}`, created: Date.now() };
+      const res = await client.apply(ref.id, built.elements, { actor: 'agent', ...(snap.files[fileId] ? {} : { files: [file] }) });
+      const id = built.ids[0]!;
+      const merged = new Map(snap.elements.map((el) => [el.id, el]));
+      for (const el of built.elements) merged.set(el.id, el);
+      const verb = snap.elements.some((el) => el.id === id && !el.isDeleted) ? 'Updated' : 'Created';
+      return text(
+        res.stale.length > 0 ? `Not applied (the human edited ${id} at the same moment, retry).` : `${verb}: ${id} (${info.width}×${info.height}px ${info.mimeType.slice(6)} from ${path}, shown ${size.width}×${size.height}).`,
+        built.warnings.length > 0 && `Warnings:\n${built.warnings.map((w) => `- ${w}`).join('\n')}`,
+        describeScene([...merged.values()], { ids: [id] }),
         await ctx.reveal(client, ref, snap.viewers),
       );
     },

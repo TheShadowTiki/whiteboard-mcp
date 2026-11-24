@@ -3,7 +3,7 @@ import { validate, stripNulls, type Schema } from '../../src/mcp/schema.js';
 import { TOOLS, toolList } from '../../src/mcp/tools.js';
 import { ELEMENT_SPEC_FIELDS } from '../../src/shared/elements.js';
 
-const TOOL_NAMES = ['canvas_open', 'canvas_read', 'canvas_draw', 'canvas_delete', 'canvas_focus', 'canvas_screenshot', 'canvas_mermaid', 'canvas_export', 'canvas_save', 'canvas_search', 'canvas_guide'];
+const TOOL_NAMES = ['canvas_open', 'canvas_read', 'canvas_draw', 'canvas_image', 'canvas_delete', 'canvas_focus', 'canvas_screenshot', 'canvas_mermaid', 'canvas_export', 'canvas_save', 'canvas_search', 'canvas_guide'];
 const ALLOWED_KEYS = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'maxItems', 'additionalProperties']);
 const TYPES = new Set(['object', 'array', 'string', 'number', 'integer', 'boolean']);
 
@@ -28,7 +28,7 @@ function portabilityProblems(schema: unknown, path: string): string[] {
 }
 
 describe('tool schemas', () => {
-  it('lists exactly the eleven tools', () => {
+  it('lists exactly the twelve tools', () => {
     expect(TOOLS.map((t) => t.name)).toEqual(TOOL_NAMES);
   });
 
@@ -54,9 +54,10 @@ describe('tool schemas', () => {
     for (const [schema, re] of bad) expect(portabilityProblems(schema, 's').join('\n')).toMatch(re);
   });
 
-  it('keep tools/list under 7 KB', () => {
+  // Fork: 7.5 KB (upstream 7 KB) to make room for canvas_image; the list was already at 7,098 bytes.
+  it('keep tools/list under 7.5 KB', () => {
     const size = Buffer.byteLength(JSON.stringify({ tools: toolList() }));
-    expect(size).toBeLessThan(7 * 1024);
+    expect(size).toBeLessThan(7.5 * 1024);
   });
 
   it('describe every tool and every top-level property', () => {
@@ -87,6 +88,7 @@ describe('tool schemas', () => {
       canvas_screenshot: [],
       canvas_mermaid: ['definition'],
       canvas_export: ['path'],
+      canvas_image: ['path'],
       canvas_save: [],
       canvas_search: [],
       canvas_guide: [],

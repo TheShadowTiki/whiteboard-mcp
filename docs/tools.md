@@ -10,6 +10,7 @@
 | `canvas_focus` | Scroll your view to some elements and pulse a highlight around them |
 | `canvas_screenshot` | PNG of the board so the agent can check its layout |
 | `canvas_mermaid` | Turn a Mermaid diagram into hand-drawn elements |
+| `canvas_image` | Put a picture from a file (PNG, JPEG, GIF, WebP, SVG: a plot, screenshot, figure) on the board |
 | `canvas_delete` | Delete elements, or clear the board |
 | `canvas_export` | Save the board as `.excalidraw` or `.png` in your project |
 | `canvas_save` | Save a frozen copy of the board to your library, so later chats can find it |

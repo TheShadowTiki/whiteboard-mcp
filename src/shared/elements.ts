@@ -673,6 +673,33 @@ class Session {
     return true;
   }
 
+  /** Creates image `id`, or points an existing image at a new file (and moves or resizes it). */
+  image(id: string, spec: ImageSpec): boolean {
+    const cur = this.live(id);
+    if (cur && cur.type !== 'image') {
+      this.warn(`${id}: is a ${cur.type}, not an image; pick another id or delete it first`);
+      return false;
+    }
+    const x = this.num(spec.x, 'x', id);
+    const y = this.num(spec.y, 'y', id);
+    if (cur) {
+      const before = [cur.x, cur.y, cur.width, cur.height].join();
+      const el = this.edit(id);
+      Object.assign(el, { fileId: spec.fileId, width: spec.width, height: spec.height, status: 'saved', crop: null });
+      if (x !== undefined) el.x = x;
+      if (y !== undefined) el.y = y;
+      this.setFrame(el, spec.frame);
+      if ([el.x, el.y, el.width, el.height].join() !== before) this.moved.add(id);
+      return true;
+    }
+    const el = this.put(this.base(id, 'image', {
+      x: x ?? 0, y: y ?? 0, width: spec.width, height: spec.height,
+      strokeColor: 'transparent', roughness: 0, fileId: spec.fileId, status: 'saved', scale: [1, 1], crop: null,
+    }));
+    this.setFrame(el, spec.frame);
+    return true;
+  }
+
   remove(id: string): void {
     const el = this.edit(id);
     el.isDeleted = true;
@@ -755,6 +782,30 @@ export function buildElements(specs: ElementSpec[], scene: ExElement[], opts: Bu
   s.settle();
   s.warnCrampedLabels();
   return s.finish(planned.filter((id, i): id is string => id !== undefined && ok[i] === true));
+}
+
+export interface ImageSpec {
+  id?: string;
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+  /** Id of the board file (BinaryFile) holding the picture. */
+  fileId: string;
+  frame?: string;
+}
+
+/** One image element, new or updated in place; its file travels separately (client.apply's files). */
+export function buildImage(spec: ImageSpec, scene: ExElement[], opts: BuildOptions = {}): BuildResult {
+  const s = new Session(scene, opts);
+  if (spec.id !== undefined && !ID_PATTERN.test(spec.id)) {
+    s.warn(`invalid id ${JSON.stringify(spec.id)} (use 1-64 of A-Z a-z 0-9 _ . : -)`);
+    return s.finish([]);
+  }
+  const id = spec.id ?? s.newId('image');
+  const ok = s.image(id, spec);
+  s.settle();
+  return s.finish(ok ? [id] : []);
 }
 
 export function deleteElements(ids: string[], scene: ExElement[], opts: BuildOptions = {}): BuildResult {

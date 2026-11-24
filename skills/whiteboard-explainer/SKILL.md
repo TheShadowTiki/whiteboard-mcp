@@ -51,6 +51,7 @@ Board links go in your in-app browser or preview tool (the editor's or app's bui
 - Free text: `{"type":"text","x":0,"y":-60,"text":"Checkout flow","fontSize":32}`.
 - Spacing: shapes ~160x80, 60-100px gaps, left-to-right for flows, top-down for hierarchies. 2-4 colours, each with a meaning.
 - Sequence diagrams or quick flowcharts: `canvas_mermaid {"definition":"sequenceDiagram\n A->>B: hi"}`.
+- Pictures (plots, screenshots, figures): `canvas_image {"path":"plots/loss.png","id":"loss","x":0,"y":0,"width":800}`; move or resize them later with `canvas_draw` by id.
 
 ## Without MCP (CLI)
 
