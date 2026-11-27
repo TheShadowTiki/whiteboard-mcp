@@ -113,8 +113,23 @@ export interface ApplyResponse {
 
 export type ViewerRequestType = 'screenshot' | 'mermaid' | 'focus';
 
+/** An axis-aligned rectangle in scene coordinates. */
+export interface Region {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
 export interface ScreenshotPayload {
   ids?: string[];
+  /** Crop to this part of the scene: the elements touching it, drawn at their place in it. */
+  region?: Region;
   dark?: boolean;
   scale?: number;
 }
@@ -155,6 +170,20 @@ export interface ViewerPrefs {
   theme: ThemeChoice;
 }
 
+/**
+ * What the human sends to the agent with "Send to agent": the selected elements, the right-clicked point,
+ * the marked drag-box region (even an empty one) and an optional instruction.
+ */
+export interface Handoff {
+  ids: string[];
+  point?: Point;
+  region?: Region;
+  text?: string;
+}
+
+/** `agent`: an agent session got it; `note`: no session could take it, so it was kept as a note on the board. */
+export type HandoffResult = 'agent' | 'note';
+
 /** Messages sent by the daemon to a browser viewer over WebSocket. */
 export type ServerMessage =
   | { t: 'snapshot'; canvas: CanvasSnapshot }
@@ -167,6 +196,9 @@ export type ServerMessage =
   /** Answers this viewer's own `save`. */
   | { t: 'saved'; ok: true; saved: SavedSummary }
   | { t: 'saved'; ok: false; error: string }
+  /** Answers this viewer's own `handoff`. */
+  | { t: 'handoff'; reqId: string; ok: true; result: HandoffResult }
+  | { t: 'handoff'; reqId: string; ok: false; error: string }
   | { t: 'error'; message: string };
 
 /** Messages sent by a browser viewer to the daemon over WebSocket. */
@@ -178,7 +210,23 @@ export type ClientMessage =
   | { t: 'save'; name?: string }
   | { t: 'visible'; visible: boolean }
   /** Saves the user's viewer settings and passes them to every other viewer. */
-  | { t: 'prefs'; prefs: ViewerPrefs };
+  | { t: 'prefs'; prefs: ViewerPrefs }
+  /** "Send to agent": goes to the agent session on this board, else becomes a note. Answered with `handoff`. */
+  | ({ t: 'handoff'; reqId: string } & Handoff);
+
+/**
+ * Agent sessions that can be woken (an MCP server whose agent app gives it a way to start a turn) connect
+ * to `API.agentWs`. A viewer's handoff goes to the most recently active session on that board.
+ */
+export type AgentMessage =
+  /** `boards`: the boards this session's chats are on. */
+  | { t: 'hello'; boards: string[]; pid?: number }
+  | { t: 'boards'; boards: string[] }
+  /** The session just used this board (a tool call). */
+  | { t: 'active'; board: string }
+  | { t: 'delivered'; reqId: string; ok: boolean; error?: string };
+
+export type ServerAgentMessage = { t: 'handoff'; reqId: string; canvasId: string; title: string; at: number } & Handoff;
 
 /**
  * Panel hosts (IDE extensions that show boards beside the chat) connect to `API.hostWs`.
@@ -221,6 +269,7 @@ export const API = {
   /** Live boards of every folder matching every word of `q` (all non-empty when empty), boards of `workspace` first. */
   search: (q = '', workspace = '', limit?: number) => `/api/search?${new URLSearchParams({ q, workspace, ...(limit ? { limit: String(limit) } : {}) })}`,
   hostWs: '/ws/host',
+  agentWs: '/ws/agent',
   /**
    * A board's viewer page. Self-contained (no query needed), and the page loads its assets, fonts and
    * socket (`ws`) relative to it, so it also works behind a proxy that mounts it under another path.
