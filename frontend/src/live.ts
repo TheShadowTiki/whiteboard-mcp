@@ -1,7 +1,7 @@
 import { CaptureUpdateAction, FONT_FAMILY, restoreElements } from '@excalidraw/excalidraw';
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types';
 import type { BinaryFileData, BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
-import type { Actor, BinaryFile, CanvasSnapshot, ExElement, SavedSummary, ServerMessage, ViewerPrefs, ViewerRequestType } from '../../src/shared/protocol';
+import type { Actor, BinaryFile, CanvasSnapshot, ExElement, Handoff, HandoffResult, SavedSummary, ServerMessage, ViewerPrefs, ViewerRequestType } from '../../src/shared/protocol';
 import { connect, type LinkStatus } from './connection';
 import { pulseHighlight } from './highlight';
 import { handleRequest, type RequestContext } from './requests';
@@ -27,6 +27,8 @@ export interface Live {
   save(name: string): Promise<SavedSummary>;
   /** Saves the user's viewer settings for every viewer; false when offline. */
   setPrefs(prefs: ViewerPrefs): boolean;
+  /** "Send to agent": edits not sent yet go first, so the agent sees them. Resolves with where it went. */
+  handoff(h: Handoff): Promise<HandoffResult>;
   stop(): void;
 }
 
@@ -35,6 +37,8 @@ type El = ExcalidrawElement;
 const SEND_INTERVAL_MS = 100;
 const FONT_TIMEOUT_MS = 3000;
 const SAVE_TIMEOUT_MS = 10_000;
+/** Longer than the daemon's wait for an agent session, after which it answers with a note. */
+const HANDOFF_TIMEOUT_MS = 10_000;
 const FAMILY_NAMES = new Map<number, string>(Object.entries(FONT_FAMILY).map(([name, id]) => [id, name]));
 
 const asEls = (elements: readonly ExElement[]) => elements as unknown as El[];
@@ -72,6 +76,19 @@ export function startLive(api: ExcalidrawImperativeAPI, wsUrls: string[], ev: Li
   let queue: Promise<void> = Promise.resolve();
   let cancelHighlight: (() => void) | undefined;
   let pendingSave: { resolve(saved: SavedSummary): void; reject(err: Error): void; timer: ReturnType<typeof setTimeout> } | undefined;
+
+  const pendingHandoffs = new Map<string, { resolve(result: HandoffResult): void; reject(err: Error): void; timer: ReturnType<typeof setTimeout> }>();
+  const settleHandoff = (reqId: string, outcome: { result: HandoffResult } | { error: string }) => {
+    const p = pendingHandoffs.get(reqId);
+    if (!p) return;
+    pendingHandoffs.delete(reqId);
+    clearTimeout(p.timer);
+    if ('result' in outcome) p.resolve(outcome.result);
+    else p.reject(new Error(outcome.error));
+  };
+  const failHandoffs = (error: string) => {
+    for (const reqId of [...pendingHandoffs.keys()]) settleHandoff(reqId, { error });
+  };
 
   const settleSave = (outcome: { saved: SavedSummary } | { error: string }) => {
     const p = pendingSave;
@@ -184,6 +201,8 @@ export function startLive(api: ExcalidrawImperativeAPI, wsUrls: string[], ev: Li
         return ev.prefs(msg.prefs);
       case 'saved':
         return settleSave(msg.ok ? { saved: msg.saved } : { error: msg.error });
+      case 'handoff':
+        return settleHandoff(msg.reqId, msg.ok ? { result: msg.result } : { error: msg.error });
       case 'error':
         return console.warn('[whiteboard-mcp] daemon:', msg.message);
     }
@@ -193,6 +212,7 @@ export function startLive(api: ExcalidrawImperativeAPI, wsUrls: string[], ev: Li
     if (status !== 'live') {
       synced = false;
       settleSave({ error: 'connection lost' });
+      failHandoffs('connection lost');
     }
     ev.status(status);
   });
@@ -223,10 +243,21 @@ export function startLive(api: ExcalidrawImperativeAPI, wsUrls: string[], ev: Li
         if (!conn.send({ t: 'save', name })) settleSave({ error: 'offline' });
       });
     },
+    handoff(h) {
+      if (!synced || !conn.isOpen()) return Promise.reject(new Error('offline'));
+      // Strokes not sent yet go first; the socket keeps the order, so the agent reads them.
+      throttle.flush();
+      const reqId = `h${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      return new Promise((resolve, reject) => {
+        pendingHandoffs.set(reqId, { resolve, reject, timer: setTimeout(() => settleHandoff(reqId, { error: 'timed out' }), HANDOFF_TIMEOUT_MS) });
+        if (!conn.send({ t: 'handoff', reqId, ...h })) settleHandoff(reqId, { error: 'offline' });
+      });
+    },
     stop() {
       throttle.flush();
       throttle.cancel();
       settleSave({ error: 'viewer closed' });
+      failHandoffs('viewer closed');
       stopped = true;
       offChange();
       document.removeEventListener('visibilitychange', onVisibility);

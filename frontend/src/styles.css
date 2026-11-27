@@ -225,3 +225,77 @@ html[data-theme='dark'] {
     animation: none;
   }
 }
+
+/* "Send to agent": a small panel beside Excalidraw's right-click menu, and the marked region. */
+.xl-handoff {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  gap: 4px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  font: 13px var(--ui-font, system-ui, sans-serif);
+}
+.xl-handoff--form {
+  width: 300px;
+}
+.xl-handoff button {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+  font: inherit;
+}
+.xl-handoff-send {
+  background: #6965db;
+  color: #fff;
+  font-weight: 600 !important;
+}
+.xl-handoff-more {
+  background: transparent;
+  color: #1b1b1f;
+}
+.xl-handoff-more:hover {
+  background: rgba(105, 101, 219, 0.12);
+}
+.xl-handoff input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font: inherit;
+  color: #1b1b1f;
+  background: #fff;
+}
+.xl-handoff input:focus {
+  outline: none;
+  border-color: #6965db;
+}
+html[data-theme='dark'] .xl-handoff {
+  background: #232329;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+html[data-theme='dark'] .xl-handoff-more,
+html[data-theme='dark'] .xl-handoff input {
+  color: #e3e3e8;
+}
+html[data-theme='dark'] .xl-handoff input {
+  background: #121212;
+  border-color: #3d3d44;
+}
+.xl-region {
+  position: fixed;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 2px dashed #6965db;
+  border-radius: 4px;
+  background: rgba(105, 101, 219, 0.06);
+  pointer-events: none;
+}

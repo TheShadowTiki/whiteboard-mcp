@@ -9,6 +9,7 @@ import { Icon } from './Icon';
 import { startLive, type Live } from './live';
 import { leaveDeadProxy } from './proxy';
 import { SAVE_ICON, SaveForm } from './SaveForm';
+import { SendToAgent } from './SendToAgent';
 import { StatusPill } from './StatusPill';
 
 const FOLLOW_KEY = 'whiteboard-mcp:follow';
@@ -170,6 +171,7 @@ export function App() {
           {saving && <SaveForm initialName={title} onSave={save} onClose={closeSave} />}
         </Chrome>
       </Excalidraw>
+      {api && config.canvasId && <SendToAgent api={api} send={(h) => live.current?.handoff(h) ?? Promise.reject(new Error('offline'))} />}
     </div>
   );
 }
