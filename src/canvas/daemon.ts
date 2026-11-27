@@ -143,6 +143,19 @@ function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
+/**
+ * A Host header naming this machine, on any port. DNS rebinding needs a foreign hostname, so the hostname is
+ * what keeps other sites out; the port may differ from ours because a tunnel can map another local port to
+ * this daemon (several daemons on remote machines, one browser).
+ */
+export function isLoopbackHost(host: string | undefined): boolean {
+  const m = /^(?:127\.0\.0\.1|localhost)(?::(\d{1,5}))?$/.exec(host ?? '');
+  return !!m && (m[1] === undefined || (Number(m[1]) > 0 && Number(m[1]) < 65536));
+}
+
+/** The port a Host header names; '' when it has none. */
+const hostPort = (host: string | undefined): string => /:(\d+)$/.exec(host ?? '')?.[1] ?? '';
+
 const MAX_BODY_BYTES = 30 * 1024 * 1024;
 const MAX_SOCKET_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -293,7 +306,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const startedAt = Date.now();
   const hostGraceMs = opts.hostGraceMs ?? DEFAULT_HOST_GRACE_MS;
   const timers: NodeJS.Timeout[] = [];
-  let allowedHosts = new Set<string>();
   let lastActivityAt = Date.now();
   let activitySeq = 0;
   let closing: Promise<void> | undefined;
@@ -657,8 +669,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     const content = await readFile(real);
     // The page can't always read its board from its own URL (a proxy may mount it at '/'), so it's told here,
     // and, for a valid link only, the daemon's own socket address: an in-app preview's proxy can go away while the daemon runs on.
+    // Not when the page came in on another port: that's a tunnel mapping another local port to us, and our
+    // own address in that browser may be a different daemon (another machine's, with the same token).
     const meta = (name: string, content: string) => `<meta name="${name}" content="${content}">`;
-    const direct = viewer && tokenMatches(viewer.token) ? meta(VIEWER_META.direct, `ws://127.0.0.1:${port}${API.viewer(viewer.canvasId, viewer.token)}ws`) : '';
+    const direct = viewer && tokenMatches(viewer.token) && hostPort(req.headers.host) === String(port) ? meta(VIEWER_META.direct, `ws://127.0.0.1:${port}${API.viewer(viewer.canvasId, viewer.token)}ws`) : '';
     const data = viewer && isViewer ? Buffer.from(content.toString('utf8').replace('<head>', `<head>${meta(VIEWER_META.canvas, viewer.canvasId)}${direct}`)) : content;
     if (res.destroyed) return;
     res.writeHead(200, {
@@ -674,7 +688,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     lastActivityAt = Date.now();
-    if (!allowedHosts.has(req.headers.host ?? '')) return sendJson(res, 403, { error: 'forbidden_host' });
+    if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'forbidden_host' });
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.pathname === '/health') {
       if (req.method !== 'GET') throw new HttpError(405, 'method_not_allowed');
@@ -895,7 +909,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     const viewerPath = parseViewerPath(url.pathname);
     const viewerWs = viewerPath?.rest === 'ws' ? viewerPath : undefined;
     if (url.pathname !== '/ws' && url.pathname !== API.hostWs && url.pathname !== API.agentWs && !viewerWs) return rejectUpgrade(socket, 404);
-    if (!allowedHosts.has(req.headers.host ?? '')) return rejectUpgrade(socket, 403);
+    if (!isLoopbackHost(req.headers.host)) return rejectUpgrade(socket, 403);
     if (req.headers.origin !== undefined && !isLoopbackOrigin(req.headers.origin)) return rejectUpgrade(socket, 403);
     if (!(viewerWs ? tokenMatches(viewerWs.token) : authorized(req, url))) return rejectUpgrade(socket, 401);
     if (url.pathname === API.hostWs) return wss.handleUpgrade(req, socket, head, onHost);
@@ -917,7 +931,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   });
   server.on('error', (err) => log(`server error: ${err.message}`));
   const port = (server.address() as AddressInfo).port;
-  allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 
   const every = (ms: number, fn: () => void) => {
     const t = setInterval(fn, ms);

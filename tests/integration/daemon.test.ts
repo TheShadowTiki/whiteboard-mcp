@@ -148,7 +148,12 @@ describe('http security', () => {
     const d = await start();
     expect((await raw(d, '/health', { Host: `evil.example:${d.port}` })).status).toBe(403);
     expect((await raw(d, `/api/canvases?token=${d.token}`, { Host: 'evil.example' })).status).toBe(403);
-    expect((await raw(d, '/c/x', { Host: `127.0.0.1:${d.port + 1}` })).status).toBe(403);
+    // The hostname keeps other sites out; any port is fine (a tunnel may map another local port to us).
+    for (const host of [`localhost.evil.example:${d.port}`, `127.0.0.1.evil.example:${d.port}`, `127.0.0.2:${d.port}`, `localhost:0`, `localhost:99999`, `localhost:${d.port}x`]) {
+      expect((await raw(d, '/health', { Host: host })).status, host).toBe(403);
+    }
+    expect((await raw(d, '/health', { Host: `127.0.0.1:${d.port + 1}` })).status).toBe(200);
+    expect((await raw(d, '/health', { Host: 'localhost' })).status).toBe(200);
     const ok = await raw(d, '/health', { Host: `localhost:${d.port}`, Origin: 'http://evil.example' });
     expect(ok.status).toBe(200);
     expect(Object.keys(ok.headers).filter((h) => h.startsWith('access-control'))).toEqual([]);
@@ -158,6 +163,7 @@ describe('http security', () => {
     const d = await start();
     expect(await wsStatus(d, `canvas=c1&token=${d.token}`, { origin: 'http://evil.example' })).toMatch(/403/);
     expect(await wsStatus(d, `canvas=c1&token=${d.token}`, { headers: { Host: `evil.example:${d.port}` } })).toMatch(/403/);
+    expect(await wsStatus(d, `canvas=c1&token=${d.token}`, { headers: { Host: `127.0.0.1:${d.port + 7}` } })).toBe('open');
     expect(await wsStatus(d, 'canvas=c1&token=wrong')).toMatch(/401/);
     expect(await wsStatus(d, `canvas=Bad..Id&token=${d.token}`)).toMatch(/400/);
     expect(await wsStatus(d, `canvas=c1&token=${d.token}`, { origin: `http://localhost:${d.port}` })).toBe('open');
@@ -414,6 +420,11 @@ describe('static frontend', () => {
     const html = `<!doctype html><html><head><meta name="whiteboard-canvas" content="c1"><meta name="whiteboard-direct" content="ws://127.0.0.1:${d.port}/c/c1/${d.token}/ws"><title>W</title></head><body><div id="root"></div></body></html>`;
     expect(await page.text()).toBe(html);
     expect(Number(page.headers.get('content-length'))).toBe(Buffer.byteLength(html));
+    // Through a tunnel from another local port, our own address may be another daemon there: no fallback to it.
+    const tunnelled = await raw(d, `/c/c1/${d.token}/`, { Host: `127.0.0.1:${d.port + 1}` });
+    expect(tunnelled.status).toBe(200);
+    expect(tunnelled.body).toContain('<meta name="whiteboard-canvas" content="c1">');
+    expect(tunnelled.body).not.toContain('whiteboard-direct');
     // A wrong token gets the page (its socket is refused) but never a socket address built from that token.
     const forged = await fetch(`${d.url}/c/c1/${'f'.repeat(64)}/`);
     expect(forged.status).toBe(200);
