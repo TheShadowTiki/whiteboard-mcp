@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts', 'tests/vscode/**/*.test.ts'],
     globalSetup: ['tests/global-setup.ts'],
+    setupFiles: ['tests/setup-env.ts'],
     testTimeout: 20000,
     hookTimeout: 20000,
     pool: 'forks',

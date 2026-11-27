@@ -761,3 +761,86 @@ describe('daemon start when the agent app connects', () => {
     expect(text).toMatch(/not permitted here, probably a sandbox/);
   });
 });
+
+describe('Send to agent (handoff to the session inbox)', () => {
+  const until = async (check: () => boolean, timeoutMs = 8000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  /** Stands in for Claude Code's session inbox: records each message written to it. */
+  async function fakeInbox() {
+    const { createServer: createUnixServer } = await import('node:net');
+    const path = join(root, `inbox-${Math.random().toString(36).slice(2, 8)}.sock`);
+    const messages: Array<{ auth: unknown; message: { content: string } }> = [];
+    const server = createUnixServer((conn) => {
+      let data = '';
+      conn.on('data', (c) => (data += c.toString()));
+      conn.on('end', () => {
+        const [auth, message] = data.trim().split('\n').map((l) => JSON.parse(l));
+        messages.push({ auth, message: message.message });
+      });
+    });
+    await new Promise<void>((r) => server.listen(path, () => r()));
+    return { path, messages, close: () => new Promise<void>((r) => server.close(() => r())) };
+  }
+
+  async function viewerOf(board: string) {
+    const { port, token } = daemon();
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?canvas=${board}&token=${token}`);
+    const answers: Array<{ t: string; reqId?: string; ok?: boolean; result?: string }> = [];
+    ws.on('message', (m) => answers.push(JSON.parse(String(m))));
+    await new Promise((r) => ws.once('open', r));
+    const handoff = async (msg: Record<string, unknown>) => {
+      const reqId = Math.random().toString(36).slice(2);
+      ws.send(JSON.stringify({ t: 'handoff', reqId, ids: [], ...msg }));
+      await until(() => answers.some((a) => a.t === 'handoff' && a.reqId === reqId), 8000);
+      return answers.find((a) => a.t === 'handoff' && a.reqId === reqId)!;
+    };
+    return { handoff, close: () => ws.close() };
+  }
+
+  it('wakes the session on the board through its inbox, describing the region', async () => {
+    const inbox = await fakeInbox();
+    const client = await connect({ env: { CLAUDE_CODE_MESSAGING_SOCKET: inbox.path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok-1', WHITEBOARD_CHAT_ID: 'handoff-1' } });
+    const board = boardId((await call(client, 'canvas_open', { title: 'Handoff target', open: false })).text);
+    await call(client, 'canvas_draw', { elements: [{ id: 'cache', type: 'rectangle', x: 100, y: 100, width: 160, height: 80, label: 'Cache' }] });
+    const v = await viewerOf(board);
+    // The session's link may still be connecting right after the handshake.
+    let answer = await v.handoff({ region: { x: 50, y: 50, width: 300, height: 200 }, text: 'split this in two' });
+    for (let i = 0; answer.result !== 'agent' && i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      inbox.messages.length = 0;
+      answer = await v.handoff({ region: { x: 50, y: 50, width: 300, height: 200 }, text: 'split this in two' });
+    }
+    expect(answer).toMatchObject({ ok: true, result: 'agent' });
+    await until(() => inbox.messages.length > 0);
+    const [got] = inbox.messages;
+    expect(got!.auth).toEqual({ type: 'auth', token: 'tok-1' });
+    expect(got!.message.content).toContain(`the board "Handoff target" [${board}]`);
+    expect(got!.message.content).toContain('Instruction: "split this in two"');
+    expect(got!.message.content).toContain('Region (50,50) 300×200, 1 element touching it:');
+    expect(got!.message.content).toContain('"cache" [Cache]');
+    v.close();
+    await inbox.close();
+  });
+
+  it('keeps the handoff as a note when the session has the inbox turned off or unreachable', async () => {
+    for (const [chat, extra] of [
+      ['handoff-off', { WHITEBOARD_HANDOFF: 'off', CLAUDE_CODE_MESSAGING_SOCKET: join(root, 'unused.sock'), CLAUDE_CODE_MESSAGING_TOKEN: 't' }],
+      ['handoff-dead', { CLAUDE_CODE_MESSAGING_SOCKET: join(root, 'nobody-listens.sock'), CLAUDE_CODE_MESSAGING_TOKEN: 't' }],
+    ] as const) {
+      const client = await connect({ env: { WHITEBOARD_CHAT_ID: chat, ...extra } });
+      const board = boardId((await call(client, 'canvas_open', { title: `Board ${chat}`, open: false })).text);
+      await new Promise((r) => setTimeout(r, 300));
+      const v = await viewerOf(board);
+      expect(await v.handoff({ point: { x: 1, y: 2 }, text: 'hello' })).toMatchObject({ ok: true, result: 'note' });
+      const read = await call(client, 'canvas_read');
+      expect(read.text).toContain('Sent to agent · point (1,2): hello');
+      v.close();
+    }
+  });
+});

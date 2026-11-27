@@ -43,6 +43,8 @@ export class ToolContext {
   readonly titles = new Map<string, string>();
   /** The client is a chat app with its own window (not a terminal): boards go in its in-app browser. */
   app = false;
+  /** Set when the agent app can be woken from the board ("Send to agent"); told which board each chat uses. */
+  link?: { used(chat: string, board: string): void };
 
   private window?: Promise<EditorWindow>;
 
@@ -100,6 +102,7 @@ export class ChatContext {
       const summary = await client.ensureCanvas(ref.id, { ...(ref.title ? { title: ref.title } : {}), ...(own ? { workspace: this.session.workspace, chat: this.chat } : {}) });
       this.base.titles.set(ref.id, summary.title === ref.id ? '' : summary.title);
     }
+    this.base.link?.used(this.chat, ref.id);
     return { client, ref: { id: ref.id, title: this.base.titles.get(ref.id) ?? '' } };
   }
 

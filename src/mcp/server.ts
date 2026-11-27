@@ -1,6 +1,8 @@
 import type { Readable, Writable } from 'node:stream';
 import { APP_NAME, VERSION } from '../shared/config.js';
+import { AgentLink } from './agentLink.js';
 import { INSTRUCTIONS } from './guide.js';
+import { inboxFromEnv } from './inbox.js';
 import { INVALID_PARAMS, JsonRpcConnection, METHOD_NOT_FOUND, RpcError } from './jsonrpc.js';
 import { Session, rootToPath } from './session.js';
 import { ToolContext, callTool, getTool, toolList } from './tools.js';
@@ -33,6 +35,10 @@ export function startMcpServer(opts: McpServerOptions = {}): JsonRpcConnection {
   const ctx = new ToolContext(session);
   let clientWantsRoots = false;
   let warmedUp = false;
+  // "Send to agent" on the board wakes this session, when its agent app offers an inbox (Claude Code).
+  const inbox = inboxFromEnv();
+  const link = inbox ? new AgentLink({ inbox, connect: () => ctx.connect() }) : undefined;
+  ctx.link = link;
 
   // Start (or upgrade) the daemon as soon as the agent app is up, not on the first drawing, so board
   // links work again after a reboot without a prompt. In the background: the handshake never waits for it.
@@ -40,6 +46,7 @@ export function startMcpServer(opts: McpServerOptions = {}): JsonRpcConnection {
     if (warmedUp) return;
     warmedUp = true;
     ctx.connect().catch((err: unknown) => debug(`daemon not started yet: ${err instanceof Error ? err.message : String(err)}`));
+    link?.start();
   };
 
   const queryRoots = (): void => {
@@ -98,5 +105,6 @@ export function startMcpServer(opts: McpServerOptions = {}): JsonRpcConnection {
       if (method === 'notifications/initialized' || method === 'notifications/roots/list_changed') queryRoots();
     },
   });
+  if (link) conn.onClose(() => link.stop());
   return conn;
 }
