@@ -951,3 +951,150 @@ describe('panel hosts', () => {
     await until(() => idle === 1, 2000);
   });
 });
+
+describe('handoff (Send to agent)', () => {
+  type AgentMsg = { t: string; reqId: string; canvasId: string; title: string; ids: string[]; point?: unknown; region?: unknown; text?: string; at: number };
+
+  async function agent(d: Daemon, boards: string[], token = d.token) {
+    const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws/agent?token=${token}`);
+    sockets.push(ws);
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    const got: AgentMsg[] = [];
+    ws.on('message', (m) => got.push(JSON.parse(String(m))));
+    const before = d.stats().agents;
+    ws.send(JSON.stringify({ t: 'hello', boards, pid: 1 }));
+    await until(() => d.stats().agents > before || d.stats().agents > 0);
+    await sleep(30);
+    return {
+      ws,
+      got,
+      send: (msg: unknown) => ws.send(JSON.stringify(msg)),
+      deliver: (reqId: string, ok = true, error?: string) => ws.send(JSON.stringify({ t: 'delivered', reqId, ok, error })),
+    };
+  }
+
+  it('sends the handoff to the agent on the board and answers agent once delivered', async () => {
+    const d = await start();
+    const a = await agent(d, ['h1']);
+    const v = await viewer(d, 'h1');
+    v.send({ t: 'handoff', reqId: 'r1', ids: ['x'], region: { x: 0, y: 0, width: 50, height: 40 }, text: 'tidy this' });
+    await until(() => a.got.length === 1);
+    expect(a.got[0]).toMatchObject({ t: 'handoff', canvasId: 'h1', ids: ['x'], region: { x: 0, y: 0, width: 50, height: 40 }, text: 'tidy this' });
+    a.deliver(a.got[0]!.reqId);
+    expect(await v.take('handoff')).toEqual({ t: 'handoff', reqId: 'r1', ok: true, result: 'agent' });
+    expect(d.stats().pending).toBe(0);
+  });
+
+  it('keeps the handoff as a note when no agent is on the board', async () => {
+    const d = await start();
+    await agent(d, ['other']);
+    const v = await viewer(d, 'h2');
+    v.send({ t: 'handoff', reqId: 'r2', ids: ['a', 'b'], point: { x: 10.4, y: 20.6 }, text: 'what is this?' });
+    expect(await v.take('handoff')).toEqual({ t: 'handoff', reqId: 'r2', ok: true, result: 'note' });
+    const note = await v.take('note');
+    expect(note.note.text).toBe('Sent to agent · point (10,21) · elements a, b: what is this?');
+  });
+
+  it('falls back to a note when the agent fails, times out or disconnects', async () => {
+    const d = await start({ handoffTimeoutMs: 150 });
+    const a = await agent(d, ['h3']);
+    const v = await viewer(d, 'h3');
+
+    v.send({ t: 'handoff', reqId: 'fail', ids: [] });
+    await until(() => a.got.length === 1);
+    a.deliver(a.got[0]!.reqId, false, 'inbox unavailable');
+    expect(await v.take('handoff', (m) => m.reqId === 'fail')).toMatchObject({ ok: true, result: 'note' });
+
+    v.send({ t: 'handoff', reqId: 'slow', ids: [] });
+    expect(await v.take('handoff', (m) => m.reqId === 'slow')).toMatchObject({ ok: true, result: 'note' });
+
+    v.send({ t: 'handoff', reqId: 'gone', ids: [] });
+    await until(() => a.got.length === 3);
+    a.ws.terminate();
+    expect(await v.take('handoff', (m) => m.reqId === 'gone')).toMatchObject({ ok: true, result: 'note' });
+    await until(() => d.stats().agents === 0 && d.stats().pending === 0);
+  });
+
+  it('picks the agent that used the board most recently', async () => {
+    const d = await start();
+    const first = await agent(d, ['h4']);
+    const second = await agent(d, ['h4']);
+    first.send({ t: 'active', board: 'h4' });
+    await sleep(30);
+    const v = await viewer(d, 'h4');
+    v.send({ t: 'handoff', reqId: 'r', ids: [] });
+    await until(() => first.got.length === 1);
+    expect(second.got).toHaveLength(0);
+    first.deliver(first.got[0]!.reqId);
+    await v.take('handoff');
+
+    second.send({ t: 'active', board: 'h4' });
+    await sleep(30);
+    v.send({ t: 'handoff', reqId: 'r2', ids: [] });
+    await until(() => second.got.length === 1);
+    expect(first.got).toHaveLength(1);
+  });
+
+  it('follows the boards an agent reports, and active adds a board', async () => {
+    const d = await start();
+    const a = await agent(d, ['old']);
+    a.send({ t: 'boards', boards: ['new'] });
+    a.send({ t: 'active', board: 'third' });
+    await sleep(30);
+    const oldV = await viewer(d, 'old');
+    oldV.send({ t: 'handoff', reqId: 'o', ids: [] });
+    expect(await oldV.take('handoff')).toMatchObject({ result: 'note' });
+    for (const board of ['new', 'third']) {
+      const v = await viewer(d, board);
+      v.send({ t: 'handoff', reqId: board, ids: [] });
+      await until(() => a.got.some((m) => m.canvasId === board));
+      a.deliver(a.got.find((m) => m.canvasId === board)!.reqId);
+      expect(await v.take('handoff')).toMatchObject({ result: 'agent' });
+    }
+  });
+
+  it('answers invalid handoffs with an error and never forwards them', async () => {
+    const d = await start();
+    const a = await agent(d, ['h5']);
+    const v = await viewer(d, 'h5');
+    v.send({ t: 'handoff', reqId: 'bad', ids: [], region: { x: 0, y: 0, width: 0, height: 1 } });
+    expect(await v.take('handoff')).toEqual({ t: 'handoff', reqId: 'bad', ok: false, error: 'region width and height must be positive' });
+    v.send({ t: 'handoff', ids: [] });
+    expect((await v.take('error')).message).toMatch(/reqId/);
+    await sleep(50);
+    expect(a.got).toHaveLength(0);
+  });
+
+  it('ignores delivered answers from another agent', async () => {
+    const d = await start({ handoffTimeoutMs: 200 });
+    const a = await agent(d, ['h6']);
+    const other = await agent(d, ['elsewhere']);
+    const v = await viewer(d, 'h6');
+    v.send({ t: 'handoff', reqId: 'r', ids: [] });
+    await until(() => a.got.length === 1);
+    other.deliver(a.got[0]!.reqId);
+    expect(await v.take('handoff')).toMatchObject({ result: 'note' });
+  });
+
+  it('requires the token for the agent socket', async () => {
+    const d = await start();
+    await expect(agent(d, ['x'], 'wrong')).rejects.toThrow(/401/);
+    expect((await raw(d, '/ws/agent', { host: `127.0.0.1:${d.port}` })).status).toBe(426);
+  });
+
+  it('keeps in-flight handoffs as notes on shutdown', async () => {
+    const d = await start();
+    const a = await agent(d, ['h7']);
+    const v = await viewer(d, 'h7');
+    v.send({ t: 'handoff', reqId: 'r', ids: [], text: 'keep me' });
+    await until(() => a.got.length === 1);
+    await d.close();
+    daemons.splice(daemons.indexOf(d), 1);
+    const d2 = await start();
+    const snap = await apiJson(d2, '/api/canvases/h7');
+    expect(snap.body.notes.map((n: { text: string }) => n.text)).toEqual(['Sent to agent: keep me']);
+  });
+});

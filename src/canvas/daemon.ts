@@ -17,11 +17,14 @@ import {
   type ApplyResponse,
   type BinaryFile,
   type CanvasMeta,
+  type Handoff,
   type SavedSummary,
+  type ServerAgentMessage,
   type ServerHostMessage,
   type ServerMessage,
   type ViewerRequestType,
 } from '../shared/protocol.js';
+import { HandoffInputError, parseBoards, parseHandoff } from '../shared/handoff.js';
 import { loadPrefs, parsePrefs, savePrefs } from './prefs.js';
 import { SavedStore } from './saved.js';
 import { MAX_SEARCH_LIMIT } from './search.js';
@@ -38,6 +41,8 @@ export interface DaemonOptions {
   showTimeoutMs?: number;
   /** How long after start a show hinting a window waits for that window's panel host to connect. */
   hostGraceMs?: number;
+  /** How long an agent session may take to accept a handoff before it becomes a note. */
+  handoffTimeoutMs?: number;
   frontendDir?: string;
   onIdle?: () => void;
   log?: (line: string) => void;
@@ -46,6 +51,7 @@ export interface DaemonOptions {
 export interface DaemonStats {
   viewers: number;
   hosts: number;
+  agents: number;
   pending: number;
   loadedCanvases: number;
   sockets: number;
@@ -89,6 +95,22 @@ interface PendingShow {
   finish: (status: number, body: unknown) => void;
 }
 
+/** An agent session that can be woken with a handoff (its MCP server connects to `API.agentWs`). */
+interface Agent {
+  ws: WebSocket;
+  /** The boards its chats are on. */
+  boards: Set<string>;
+  /** Activity sequence number of its last tool call per board. */
+  activeOn: Map<string, number>;
+  lastActive: number;
+  alive: boolean;
+}
+
+interface PendingHandoff {
+  agent: Agent;
+  finish: (ok: boolean, error?: string) => void;
+}
+
 /** A show waiting for a panel host to connect to a daemon that just started. */
 interface HostWait {
   retry: () => void;
@@ -96,6 +118,8 @@ interface HostWait {
 }
 
 const DEFAULT_SHOW_TIMEOUT_MS = 5_000;
+const DEFAULT_HANDOFF_TIMEOUT_MS = 5_000;
+const MAX_REQ_ID = 64;
 /** Panel hosts look for a new daemon every few seconds (daemon.json), so a fresh daemon gives them this long. */
 const DEFAULT_HOST_GRACE_MS = 5_000;
 const MAX_HOST_FOLDERS = 64;
@@ -263,6 +287,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const hosts = new Set<Host>();
   const pendingShows = new Map<string, PendingShow>();
   const hostWaits = new Set<HostWait>();
+  const agents = new Set<Agent>();
+  const pendingHandoffs = new Map<string, PendingHandoff>();
+  const handoffTimeoutMs = opts.handoffTimeoutMs ?? DEFAULT_HANDOFF_TIMEOUT_MS;
   const startedAt = Date.now();
   const hostGraceMs = opts.hostGraceMs ?? DEFAULT_HOST_GRACE_MS;
   const timers: NodeJS.Timeout[] = [];
@@ -366,6 +393,66 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       pending.set(reqId, { viewer, finish });
       send(viewer, { t: 'request', reqId, type, payload });
     });
+  }
+
+  /** The agent session on this board that used it most recently (by tool call, then by any message). */
+  function pickAgent(canvasId: string): Agent | undefined {
+    let best: Agent | undefined;
+    for (const a of agents) {
+      if (a.ws.readyState !== WebSocket.OPEN || !a.boards.has(canvasId)) continue;
+      const on = a.activeOn.get(canvasId) ?? 0;
+      const bestOn = best ? (best.activeOn.get(canvasId) ?? 0) : -1;
+      if (!best || on > bestOn || (on === bestOn && a.lastActive > best.lastActive)) best = a;
+    }
+    return best;
+  }
+
+  function sendAgent(agent: Agent, msg: ServerAgentMessage): void {
+    if (agent.ws.readyState !== WebSocket.OPEN) return;
+    if (agent.ws.bufferedAmount > MAX_SOCKET_BUFFER) return void agent.ws.terminate();
+    agent.ws.send(JSON.stringify(msg));
+  }
+
+  /** What a handoff no session took looks like as a note, so the agent still finds it on its next read. */
+  function handoffNote(h: Handoff): string {
+    const r = (n: number) => Math.round(n);
+    const parts = ['Sent to agent'];
+    if (h.region) parts.push(`region (${r(h.region.x)},${r(h.region.y)}) ${r(h.region.width)}×${r(h.region.height)}`);
+    else if (h.point) parts.push(`point (${r(h.point.x)},${r(h.point.y)})`);
+    if (h.ids.length) parts.push(`elements ${h.ids.slice(0, 20).join(', ')}${h.ids.length > 20 ? ` +${h.ids.length - 20}` : ''}`);
+    return `${parts.join(' · ')}${h.text ? `: ${h.text}` : ''}`;
+  }
+
+  /**
+   * "Send to agent": goes to the board's most recently active agent session; when there is none, or it
+   * doesn't accept in time, the handoff is kept as a note so nothing the human sent is lost.
+   */
+  function handoff(viewer: Viewer, reqId: string, h: Handoff): void {
+    const canvasId = viewer.canvasId;
+    const asNote = () => {
+      try {
+        store.ensure(canvasId);
+        broadcast(canvasId, { t: 'note', note: store.addNote(canvasId, handoffNote(h)) });
+        send(viewer, { t: 'handoff', reqId, ok: true, result: 'note' });
+      } catch (err) {
+        log(`handoff note failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+        send(viewer, { t: 'handoff', reqId, ok: false, error: 'internal_error' });
+      }
+    };
+    const agent = pickAgent(canvasId);
+    if (!agent) return asNote();
+    const id = randomUUID();
+    const finish = (ok: boolean, error?: string) => {
+      if (!pendingHandoffs.delete(id)) return;
+      clearTimeout(timer);
+      if (ok) return send(viewer, { t: 'handoff', reqId, ok: true, result: 'agent' });
+      log(`handoff not delivered: ${error ?? 'unknown'}`);
+      asNote();
+    };
+    const timer = setTimeout(() => finish(false, 'timeout'), handoffTimeoutMs);
+    pendingHandoffs.set(id, { agent, finish });
+    const title = store.has(canvasId) ? store.summaryOf(canvasId).title : '';
+    sendAgent(agent, { t: 'handoff', reqId: id, canvasId, title, at: Date.now(), ...h });
   }
 
   /**
@@ -600,7 +687,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (url.pathname !== '/api/canvases' && !url.pathname.startsWith('/api/canvases/')) throw new HttpError(404, 'not_found');
       return handleApi(req, res, url);
     }
-    if (url.pathname === '/ws' || url.pathname === API.hostWs) return sendText(res, 426, 'upgrade required');
+    if (url.pathname === '/ws' || url.pathname === API.hostWs || url.pathname === API.agentWs) return sendText(res, 426, 'upgrade required');
     return serveStatic(req, res, url);
   }
 
@@ -663,6 +750,19 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           for (const set of viewersByCanvas.values()) for (const other of set) if (other !== viewer) send(other, { t: 'prefs', prefs });
           return;
         }
+        case 'handoff': {
+          // The viewer waits for this answer, so every failure gets one too.
+          const reqId = typeof msg.reqId === 'string' && msg.reqId && msg.reqId.length <= MAX_REQ_ID ? msg.reqId : undefined;
+          if (!reqId) throw new ValidationError(`reqId must be a string of at most ${MAX_REQ_ID} characters`);
+          let h: Handoff;
+          try {
+            h = parseHandoff(msg);
+          } catch (err) {
+            if (err instanceof HandoffInputError) return send(viewer, { t: 'handoff', reqId, ok: false, error: err.message });
+            throw err;
+          }
+          return handoff(viewer, reqId, h);
+        }
         default:
           throw new ValidationError(`unknown message type ${JSON.stringify(msg.t)}`);
       }
@@ -710,6 +810,52 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     });
   }
 
+  function onAgentMessage(agent: Agent, data: RawData): void {
+    agent.lastActive = ++activitySeq;
+    let msg: unknown;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
+    if (!isObject(msg)) return;
+    switch (msg.t) {
+      case 'hello':
+      case 'boards': {
+        agent.boards = new Set(parseBoards(msg.boards));
+        for (const id of [...agent.activeOn.keys()]) if (!agent.boards.has(id)) agent.activeOn.delete(id);
+        return;
+      }
+      case 'active': {
+        const [board] = parseBoards([msg.board]);
+        if (!board) return;
+        agent.boards.add(board);
+        agent.activeOn.set(board, agent.lastActive);
+        return;
+      }
+      case 'delivered': {
+        const entry = typeof msg.reqId === 'string' ? pendingHandoffs.get(msg.reqId) : undefined;
+        if (entry?.agent !== agent) return;
+        entry.finish(msg.ok === true, typeof msg.error === 'string' && msg.error ? msg.error.slice(0, 500) : undefined);
+        return;
+      }
+    }
+  }
+
+  function onAgent(ws: WebSocket): void {
+    const agent: Agent = { ws, boards: new Set(), activeOn: new Map(), lastActive: ++activitySeq, alive: true };
+    agents.add(agent);
+    ws.on('pong', () => {
+      agent.alive = true;
+    });
+    ws.on('message', (data) => onAgentMessage(agent, data));
+    ws.on('error', (err) => log(`agent ws error: ${err.message}`));
+    ws.on('close', () => {
+      agents.delete(agent);
+      for (const entry of [...pendingHandoffs.values()]) if (entry.agent === agent) entry.finish(false, 'agent_disconnected');
+    });
+  }
+
   function onConnection(ws: WebSocket, canvasId: string): void {
     const viewer: Viewer = { ws, canvasId, visible: false, lastActive: ++activitySeq, alive: true };
     let viewers = viewersByCanvas.get(canvasId);
@@ -748,11 +894,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (closing) return rejectUpgrade(socket, 503);
     const viewerPath = parseViewerPath(url.pathname);
     const viewerWs = viewerPath?.rest === 'ws' ? viewerPath : undefined;
-    if (url.pathname !== '/ws' && url.pathname !== API.hostWs && !viewerWs) return rejectUpgrade(socket, 404);
+    if (url.pathname !== '/ws' && url.pathname !== API.hostWs && url.pathname !== API.agentWs && !viewerWs) return rejectUpgrade(socket, 404);
     if (!allowedHosts.has(req.headers.host ?? '')) return rejectUpgrade(socket, 403);
     if (req.headers.origin !== undefined && !isLoopbackOrigin(req.headers.origin)) return rejectUpgrade(socket, 403);
     if (!(viewerWs ? tokenMatches(viewerWs.token) : authorized(req, url))) return rejectUpgrade(socket, 401);
     if (url.pathname === API.hostWs) return wss.handleUpgrade(req, socket, head, onHost);
+    if (url.pathname === API.agentWs) return wss.handleUpgrade(req, socket, head, onAgent);
     const canvasId = viewerWs?.canvasId ?? url.searchParams.get('canvas') ?? '';
     if (!CANVAS_ID_PATTERN.test(canvasId)) return rejectUpgrade(socket, 400);
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, canvasId));
@@ -778,7 +925,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     timers.push(t);
   };
   every(heartbeatMs, () => {
-    const peers: Array<Viewer | Host> = [...hosts];
+    const peers: Array<Viewer | Host | Agent> = [...hosts, ...agents];
     for (const viewers of viewersByCanvas.values()) peers.push(...viewers);
     for (const peer of peers) {
       if (!peer.alive) {
@@ -807,6 +954,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       for (const entry of [...pending.values()]) entry.finish(503, { error: 'shutting_down' });
       for (const entry of [...pendingShows.values()]) entry.finish(503, { error: 'shutting_down' });
       for (const wait of [...hostWaits]) wait.finish(503, { error: 'shutting_down' });
+      // Kept as notes, so a handoff in flight survives the shutdown.
+      for (const entry of [...pendingHandoffs.values()]) entry.finish(false, 'shutting_down');
       const closed = [new Promise<void>((r) => server.close(() => r()))];
       for (const ws of wss.clients) {
         closed.push(new Promise((r) => ws.once('close', r)));
@@ -828,7 +977,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     stats: () => {
       let viewers = 0;
       for (const set of viewersByCanvas.values()) viewers += set.size;
-      return { viewers, hosts: hosts.size, pending: pending.size + pendingShows.size + hostWaits.size, loadedCanvases: store.loadedCount, sockets: wss.clients.size };
+      return { viewers, hosts: hosts.size, agents: agents.size, pending: pending.size + pendingShows.size + hostWaits.size + pendingHandoffs.size, loadedCanvases: store.loadedCount, sockets: wss.clients.size };
     },
   };
 }

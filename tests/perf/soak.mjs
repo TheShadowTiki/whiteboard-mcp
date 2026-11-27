@@ -34,6 +34,41 @@ function viewer() {
   });
 }
 
+function agent() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${d.url.replace('http', 'ws')}/ws/agent?token=soak`);
+    ws.once('open', () => {
+      ws.send(JSON.stringify({ t: 'hello', boards: [canvas] }));
+      resolve(ws);
+    });
+    ws.once('error', reject);
+  });
+}
+
+/** One handoff per outcome: delivered, refused by the agent, and lost with the agent's socket. */
+async function handoffs(n) {
+  const v = await viewer();
+  const answers = new Map();
+  v.on('message', (m) => {
+    const msg = JSON.parse(String(m));
+    if (msg.t === 'handoff') answers.get(msg.reqId)?.(msg);
+  });
+  const answered = (reqId) => new Promise((r) => answers.set(reqId, r));
+  const ag = await agent();
+  ag.on('message', (m) => {
+    const msg = JSON.parse(String(m));
+    if (msg.text === 'drop') return void ag.terminate();
+    ag.send(JSON.stringify({ t: 'delivered', reqId: msg.reqId, ok: msg.text === 'ok' }));
+  });
+  await new Promise((r) => setTimeout(r, 2));
+  for (const text of ['ok', 'refuse', 'drop']) {
+    const done = answered(`${n}-${text}`);
+    v.send(JSON.stringify({ t: 'handoff', reqId: `${n}-${text}`, ids: [`e${n % 200}`], region: { x: 0, y: 0, width: 100, height: 100 }, text }));
+    await done;
+  }
+  v.terminate();
+}
+
 async function round() {
   for (let n = 0; n < 300; n++) {
     version++;
@@ -54,6 +89,7 @@ async function round() {
     b.terminate();
     await (await req).arrayBuffer();
   }
+  for (let n = 0; n < 30; n++) await handoffs(n);
   await post(`/api/canvases/${canvas}/notes`, { text: 'tail' });
 }
 
@@ -82,7 +118,7 @@ const lateGrowth = samples.at(-1) - samples[Math.floor(samples.length / 2)];
 console.log(JSON.stringify({ baselineMB: baseline.toFixed(1), samplesMB: samples.map((s) => s.toFixed(1)), growthMB: growth.toFixed(2), lateGrowthMB: lateGrowth.toFixed(2), stats, scene }));
 const failures = [];
 if (scene.elements !== 200 || scene.posts < ROUNDS * 300) failures.push(`load did not land: ${JSON.stringify(scene)}`);
-if (stats.viewers || stats.pending || stats.sockets) failures.push(`leaked connection state ${JSON.stringify(stats)}`);
+if (stats.viewers || stats.agents || stats.pending || stats.sockets) failures.push(`leaked connection state ${JSON.stringify(stats)}`);
 if (lateGrowth > 3) failures.push(`heap still growing in the second half: +${lateGrowth.toFixed(2)} MB`);
 if (failures.length) {
   console.error(failures.join('\n'));
