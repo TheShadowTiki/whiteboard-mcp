@@ -1,6 +1,11 @@
 # Plan: Send to agent
 
-Status: draft for review. Branch `feat/send-to-agent`. Delete this file before merging; what stays true moves to `AGENTS.md` and `docs/`.
+Status: implemented on branch `feat/send-to-agent` (2026-11-26); real-session test pending. Delete this file before merging; what stays true is in `AGENTS.md` and `docs/tools.md`.
+
+Found while building:
+- Excalidraw opens no right-click menu while a drawing tool is active, so neither does Send to agent: press V first. Documented in `docs/tools.md`.
+- The server instructions are capped at 700 characters (sent every session), so the agents' guide says nothing about handoffs; the message explains itself.
+- Pre-existing, not from this work: a full `npm test` run leaves one `tests/fixtures/serve.mjs` daemon behind (seen on `main` too).
 
 ## Goal
 

@@ -13,6 +13,7 @@ All settings are environment variables on the MCP server (or CLI) process.
 | `WHITEBOARD_IDLE_MS` | `0` (never) | Daemon exits after this long with no viewers or requests. By default it keeps running until `whiteboard-mcp stop`, logout or reboot; a newer version replaces it automatically |
 | `WHITEBOARD_WORKSPACE` | MCP root or cwd | Override the workspace used to pick the default board |
 | `WHITEBOARD_EXPORT_DIR` | | Extra directory `canvas_export` may write to (besides the workspace and temp) |
+| `WHITEBOARD_HANDOFF` | on | `off`: "Send to agent" never wakes this session; what the human sends becomes a note instead |
 | `WHITEBOARD_DEBUG` | | `1` logs MCP diagnostics to stderr |
 
 See [boards.md](boards.md) for how the chat id and host id decide which board you get and where it shows up.

@@ -7,7 +7,7 @@
 
 https://github.com/user-attachments/assets/197876d8-5620-4c1b-9bc3-332e0e7d5622
 
-<p align="center"><b>Whiteboard MCP</b> is a free and extremely token-efficient <b>whiteboard MCP</b> that runs locally. Your coding agent draws diagrams on a live board beside the chat, and sees what you draw back.</p>
+<p align="center"><b>Whiteboard MCP</b> is a free and extremely token-efficient <b>whiteboard MCP</b> that runs locally. Your coding agent draws diagrams on a live board beside the chat, and sees what you draw back. In Claude Code, right-click the board and <b>Send to agent</b> to point it at a shape or an area and get it working right away.</p>
 
 <p align="center"><a href="#add-it-to-your-agent">One command install for every agent ↓</a></p>
 
