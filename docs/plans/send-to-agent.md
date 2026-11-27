@@ -1,6 +1,6 @@
 # Plan: Send to agent
 
-Status: implemented on branch `feat/send-to-agent` (2026-11-26); real-session test pending. Delete this file before merging; what stays true is in `AGENTS.md` and `docs/tools.md`.
+Status: implemented on branch `feat/send-to-agent` (2026-11-26). Real-session test passed 2026-11-27: a drag-box region sent from the live board woke an idle Claude Code session (VS Code extension, 2.1.332) with the region, the element in it and the suggested calls; `canvas_screenshot {region}` returned exactly that area. Delete this file before merging; what stays true is in `AGENTS.md` and `docs/tools.md`.
 
 Found while building:
 - Excalidraw opens no right-click menu while a drawing tool is active, so neither does Send to agent: press V first. Documented in `docs/tools.md`.
