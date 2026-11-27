@@ -113,3 +113,47 @@ test('a note typed in the viewer reaches the agent', async ({ page, rest, canvas
     .toContain('Please make the database box bigger');
   await expect(page.locator('.xl-status')).toHaveText('live', { timeout: 5000 });
 });
+
+test('screenshot of a region crops to exactly that part of the scene, even when it is empty', async ({ page, rest, canvasId }) => {
+  await openViewer(page, canvasId);
+  await seed(rest, canvasId, [{ id: 'red', type: 'rectangle', x: 0, y: 0, width: 200, height: 80, backgroundColor: '#e03131', fillStyle: 'solid' }, box('far', 900, 'Far')]);
+  await expect.poll(async () => (await sceneElements(page)).length).toBe(3);
+
+  const shot = async (payload: unknown) => (await rest.post(api.request(canvasId), { type: 'screenshot', payload })).result as { base64: string; width: number; height: number };
+  /** RGBA of a pixel of the PNG, decoded in the page. */
+  const pixel = (base64: string, x: number, y: number) =>
+    page.evaluate(
+      async ({ base64, x, y }) => {
+        const img = new Image();
+        img.src = `data:image/png;base64,${base64}`;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext('2d')!;
+        g.drawImage(img, 0, 0);
+        return [...g.getImageData(x, y, 1, 1).data];
+      },
+      { base64, x, y },
+    );
+  const reddish = ([r, g, b]: number[]) => r! > 180 && g! < 120 && b! < 120;
+  const light = ([r, g, b]: number[]) => r! > 230 && g! > 230 && b! > 230;
+
+  // The red box's right half (scene x 100–200) fills the left half of a 200×120 region at scale 1.
+  const half = await shot({ region: { x: 100, y: -20, width: 200, height: 120 }, scale: 1, dark: false });
+  expect({ width: half.width, height: half.height }).toEqual({ width: 200, height: 120 });
+  expect(reddish(await pixel(half.base64, 50, 60))).toBe(true);
+  expect(light(await pixel(half.base64, 150, 60))).toBe(true);
+  expect(light(await pixel(half.base64, 50, 5))).toBe(true);
+
+  const empty = await shot({ region: { x: 5000, y: 5000, width: 300, height: 100 }, scale: 1, dark: false });
+  expect({ width: empty.width, height: empty.height }).toEqual({ width: 300, height: 100 });
+  expect(light(await pixel(empty.base64, 150, 50))).toBe(true);
+
+  // ids narrow the region to those elements: the red box is left out.
+  const narrowed = await shot({ region: { x: 100, y: -20, width: 200, height: 120 }, ids: ['far'], scale: 1, dark: false });
+  expect(light(await pixel(narrowed.base64, 50, 60))).toBe(true);
+
+  const bad = await rest.post(api.request(canvasId), { type: 'screenshot', payload: { region: { x: 0, y: 0, width: 0, height: 5 } } }, 502);
+  expect(bad.error).toMatch(/positive/);
+});

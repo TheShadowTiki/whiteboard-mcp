@@ -54,10 +54,11 @@ describe('tool schemas', () => {
     for (const [schema, re] of bad) expect(portabilityProblems(schema, 's').join('\n')).toMatch(re);
   });
 
-  // Fork: 7.5 KB (upstream 7 KB) to make room for canvas_image; the list was already at 7,098 bytes.
-  it('keep tools/list under 7.5 KB', () => {
+  // Fork: 8 KB (upstream 7 KB): 7.5 KB made room for canvas_image (the list was at 7,098 bytes), and
+  // region on canvas_read/canvas_screenshot ("Send to agent") took it past that (it was at 7,673).
+  it('keep tools/list under 8 KB', () => {
     const size = Buffer.byteLength(JSON.stringify({ tools: toolList() }));
-    expect(size).toBeLessThan(7.5 * 1024);
+    expect(size).toBeLessThan(8 * 1024);
   });
 
   it('describe every tool and every top-level property', () => {

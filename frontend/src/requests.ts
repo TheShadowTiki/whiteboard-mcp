@@ -1,7 +1,8 @@
-import { convertToExcalidrawElements, exportToBlob, getCommonBounds } from '@excalidraw/excalidraw';
+import { convertToExcalidrawElements, exportToBlob, exportToCanvas, getCommonBounds } from '@excalidraw/excalidraw';
 import type { ExcalidrawElement, NonDeletedExcalidrawElement } from '@excalidraw/excalidraw/element/types';
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
-import type { FocusPayload, FocusResult, MermaidPayload, MermaidResult, ScreenshotPayload, ScreenshotResult, ViewerRequestType } from '../../src/shared/protocol';
+import { idsInRegion, parseRegion } from '../../src/shared/handoff';
+import type { ExElement, FocusPayload, FocusResult, MermaidPayload, MermaidResult, Region, ScreenshotPayload, ScreenshotResult, ViewerRequestType } from '../../src/shared/protocol';
 import { pulseHighlight } from './highlight';
 
 export interface RequestContext {
@@ -42,8 +43,67 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/** Excalidraw's dark export: the light rendering, inverted. Applied to our own background too. */
+const DARK_FILTER = 'invert(93%) hue-rotate(180deg)';
+
+function canvasToBase64(canvas: HTMLCanvasElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? blobToBase64(blob).then(resolve, reject) : reject(new Error('could not encode the image'))), 'image/png');
+  });
+}
+
+/**
+ * Exactly the region, as the human would see it there: the elements touching it are drawn, then the
+ * image is cropped to the region. An empty region gives a blank image of its size ("draw here").
+ */
+async function regionScreenshot(ctx: RequestContext, p: Partial<ScreenshotPayload>, region: Region): Promise<ScreenshotResult> {
+  const { api } = ctx;
+  const all = api.getSceneElements();
+  let ids = idsInRegion(all as unknown as ExElement[], region);
+  if (Array.isArray(p.ids) && p.ids.length) {
+    const want = new Set(p.ids);
+    ids = ids.filter((id) => want.has(id));
+  }
+  const wanted = new Set(ids);
+  const elements = all.filter((el) => wanted.has(el.id) || (el.type === 'text' && el.containerId !== null && wanted.has(el.containerId)));
+  const dark = typeof p.dark === 'boolean' ? p.dark : ctx.dark();
+  const background = api.getAppState().viewBackgroundColor;
+  const longest = Math.max(region.width, region.height, 1);
+  let scale = typeof p.scale === 'number' && p.scale > 0 ? Math.min(p.scale, MAX_SCALE) : Math.min(2, MAX_SIDE / longest);
+  scale = Math.min(scale, MAX_CANVAS_SIDE / longest);
+
+  let source: { canvas: HTMLCanvasElement; x: number; y: number } | undefined;
+  if (elements.length) {
+    const [x1, y1, x2, y2] = getCommonBounds(elements);
+    // Elements reaching far outside the region are drawn whole before cropping; keep that canvas drawable.
+    scale = Math.min(scale, MAX_CANVAS_SIDE / Math.max(x2 - x1, y2 - y1, 1));
+    const canvas = await exportToCanvas({
+      elements,
+      files: api.getFiles(),
+      exportPadding: 0,
+      appState: { exportBackground: false, exportWithDarkMode: dark, viewBackgroundColor: background },
+      getDimensions: (w: number, h: number) => ({ width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)), scale }),
+    });
+    source = { canvas, x: x1, y: y1 };
+  }
+
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(region.width * scale));
+  out.height = Math.max(1, Math.round(region.height * scale));
+  const g = out.getContext('2d');
+  if (!g) throw new Error('could not draw the screenshot');
+  if (dark) g.filter = DARK_FILTER;
+  g.fillStyle = background;
+  g.fillRect(0, 0, out.width, out.height);
+  g.filter = 'none';
+  if (source) g.drawImage(source.canvas, Math.round((source.x - region.x) * scale), Math.round((source.y - region.y) * scale));
+  return { mimeType: 'image/png', base64: await canvasToBase64(out), width: out.width, height: out.height };
+}
+
 async function screenshot(ctx: RequestContext, payload: unknown): Promise<ScreenshotResult> {
   const p = obj<ScreenshotPayload>(payload);
+  const region = parseRegion(p.region);
+  if (region) return regionScreenshot(ctx, p, region);
   const { api } = ctx;
   const elements = pick(api, p.ids);
   let size = { width: 0, height: 0 };

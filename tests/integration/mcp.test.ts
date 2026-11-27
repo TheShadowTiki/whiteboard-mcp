@@ -844,3 +844,29 @@ describe('Send to agent (handoff to the session inbox)', () => {
     }
   });
 });
+
+describe('region on canvas_read', () => {
+  it('describes the elements touching the region, narrowed by ids, and says when it is empty', async () => {
+    const client = await connect({ env: { WHITEBOARD_CHAT_ID: 'region-read' } });
+    await call(client, 'canvas_open', { title: 'Regions', open: false });
+    await call(client, 'canvas_draw', {
+      elements: [
+        { id: 'left', type: 'rectangle', x: 0, y: 0, width: 100, height: 60, label: 'Left' },
+        { id: 'right', type: 'rectangle', x: 400, y: 0, width: 100, height: 60, label: 'Right' },
+      ],
+    });
+    const both = await call(client, 'canvas_read', { region: { x: 50, y: 10, width: 400, height: 20 } });
+    expect(both.text).toMatch(/"left" \[Left\]/);
+    expect(both.text).toMatch(/"right" \[Right\]/);
+    const one = await call(client, 'canvas_read', { region: { x: -10, y: -10, width: 50, height: 50 } });
+    expect(one.text).toMatch(/"left"/);
+    expect(one.text).not.toMatch(/"right"/);
+    const narrowed = await call(client, 'canvas_read', { region: { x: 50, y: 10, width: 400, height: 20 }, ids: ['right'] });
+    expect(narrowed.text).not.toMatch(/"left"/);
+    expect(narrowed.text).toMatch(/"right"/);
+    expect((await call(client, 'canvas_read', { region: { x: 1000, y: 1000, width: 30, height: 30 } })).text).toContain('Region (1000,1000) 30×30 is empty.');
+    const bad = await call(client, 'canvas_read', { region: { x: 0, y: 0, width: -1, height: 5 } });
+    expect(bad.result.isError).toBe(true);
+    expect(bad.text).toMatch(/positive/);
+  });
+});

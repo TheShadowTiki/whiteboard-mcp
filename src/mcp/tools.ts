@@ -5,8 +5,9 @@ import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { CanvasClient, CanvasError } from '../canvas/client.js';
 import { describeChanges, describeScene } from '../shared/describe.js';
 import { ELEMENT_SPEC_FIELDS, buildElements, buildImage, deleteElements, type ElementSpec } from '../shared/elements.js';
+import { HandoffInputError, idsInRegion, parseRegion, resolveIds } from '../shared/handoff.js';
 import { fitSize, imageInfo } from '../shared/image.js';
-import type { CanvasSummary, ChangesResponse, ExElement, MermaidResult, SavedSummary, ScreenshotResult } from '../shared/protocol.js';
+import type { CanvasSummary, ChangesResponse, ExElement, MermaidResult, Region, SavedSummary, ScreenshotResult } from '../shared/protocol.js';
 import { editorWindow, type EditorWindow } from './editor.js';
 import { closestBoards, findBoard, whereFrom } from './find.js';
 import { GUIDE } from './guide.js';
@@ -153,6 +154,20 @@ const num = (description: string): Schema => ({ type: 'number', description });
 const bool = (description: string): Schema => ({ type: 'boolean', description });
 const ids = (description = 'Element ids'): Schema => ({ type: 'array', items: { type: 'string' }, description });
 const obj = (properties: Record<string, Schema>, required?: string[]): Schema & { type: 'object' } => ({ type: 'object', properties, ...(required ? { required } : {}) });
+const N: Schema = { type: 'number' };
+/** A part of the scene, e.g. what the human sent with "Send to agent". */
+const REGION: Schema = { type: 'object', description: 'Scene area {x,y,width,height}', properties: { x: N, y: N, width: N, height: N }, required: ['x', 'y', 'width', 'height'] };
+
+function regionArg(value: unknown): Region | undefined {
+  try {
+    return parseRegion(value);
+  } catch (err) {
+    if (err instanceof HandoffInputError) throw new ToolError(err.message);
+    throw err;
+  }
+}
+
+const regionName = (g: Region) => `Region (${Math.round(g.x)},${Math.round(g.y)}) ${Math.round(g.width)}×${Math.round(g.height)}`;
 
 const SHAPE_TYPES = ['rectangle', 'ellipse', 'diamond', 'text', 'arrow', 'line', 'frame', 'freedraw'];
 const FIELD_SCHEMA: Record<keyof ElementSpec, Omit<Schema, 'description'>> = {
@@ -433,16 +448,29 @@ export const TOOLS: Tool[] = [
     description: 'Read the board: scene description (or JSON), then what the human changed and noted since your last read.',
     inputSchema: obj({
       ids: ids('Only describe these elements'),
+      region: REGION,
       format: { type: 'string', enum: ['summary', 'json'], description: 'summary (default) or json' },
     }),
     quiet: true,
     async run(args, ctx) {
+      const region = regionArg(args.region);
       const { client, ref } = await ctx.canvas();
-      const only = args.ids as string[] | undefined;
+      let only = args.ids as string[] | undefined;
       const snap = await client.snapshot(ref.id);
       const since = ctx.session.lastReadRev(ctx.chat, ref.id);
       const ch = await client.changes(ref.id, since);
-      const scene = args.format === 'json' ? trimmedJson(snap.elements, only) : describeScene(snap.elements, only?.length ? { ids: only } : {});
+      if (region) {
+        // Elements touching the region; with ids too, only those of them.
+        const inside = idsInRegion(snap.elements, region);
+        const want = only?.length ? new Set(resolveIds(snap.elements, only)) : undefined;
+        only = want ? inside.filter((id) => want.has(id)) : inside;
+      }
+      const scene =
+        region && !only?.length
+          ? `${regionName(region)} is empty.`
+          : args.format === 'json'
+            ? trimmedJson(snap.elements, only)
+            : describeScene(snap.elements, only?.length ? { ids: only } : {});
       // A full (log-truncated) answer on the first read is just the scene above, not news.
       const human = ch.full ? (since > 0 ? 'too many to list; the scene above is current.' : '') : describeChanges(ch.changes, [...snap.elements, ...ch.elements], { actor: 'human' });
       const notes = unreadNotes(ch, since);
@@ -554,10 +582,12 @@ export const TOOLS: Tool[] = [
   {
     name: 'canvas_screenshot',
     description: 'PNG of the board as the human sees it, to check your layout.',
-    inputSchema: obj({ ids: ids('Only these elements'), dark: bool('Dark theme') }),
+    inputSchema: obj({ ids: ids('Only these elements'), region: REGION, dark: bool('Dark theme') }),
     async run(args, ctx) {
-      const { result, ref } = await viewerRequest<ScreenshotResult>(ctx, 'screenshot', { ids: args.ids, dark: args.dark });
-      return { content: [{ type: 'image', data: result.base64, mimeType: 'image/png' }, { type: 'text', text: `Screenshot of ${boardName(ref)}, ${result.width}×${result.height}px.` }] };
+      const region = regionArg(args.region);
+      const { result, ref } = await viewerRequest<ScreenshotResult>(ctx, 'screenshot', { ids: args.ids, region, dark: args.dark });
+      const what = region ? ` (${regionName(region).toLowerCase()})` : '';
+      return { content: [{ type: 'image', data: result.base64, mimeType: 'image/png' }, { type: 'text', text: `Screenshot of ${boardName(ref)}${what}, ${result.width}×${result.height}px.` }] };
     },
   },
   {
